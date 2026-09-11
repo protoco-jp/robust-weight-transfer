@@ -48,10 +48,89 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import igl
 import numpy as np
 import scipy as sp
+from scipy.spatial import cKDTree
 import robust_laplacian
+
+
+def _dot_rows(a, b):
+    return np.einsum("ij,ij->i", a, b)
+
+
+def _closest_points_on_triangles(points, a, b, c):
+    """Vectorized closest point on triangle for per-row inputs."""
+    ab = b - a
+    ac = c - a
+    ap = points - a
+
+    d1 = _dot_rows(ab, ap)
+    d2 = _dot_rows(ac, ap)
+
+    out = np.empty_like(points)
+    assigned = np.zeros(points.shape[0], dtype=bool)
+
+    mask = (d1 <= 0) & (d2 <= 0)
+    out[mask] = a[mask]
+    assigned |= mask
+
+    bp = points - b
+    d3 = _dot_rows(ab, bp)
+    d4 = _dot_rows(ac, bp)
+    mask = (~assigned) & (d3 >= 0) & (d4 <= d3)
+    out[mask] = b[mask]
+    assigned |= mask
+
+    vc = d1 * d4 - d3 * d2
+    denom = d1 - d3
+    v = np.divide(d1, denom, out=np.zeros_like(d1), where=np.abs(denom) > 1e-12)
+    mask = (~assigned) & (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    out[mask] = a[mask] + (v[mask, None] * ab[mask])
+    assigned |= mask
+
+    cp = points - c
+    d5 = _dot_rows(ab, cp)
+    d6 = _dot_rows(ac, cp)
+    mask = (~assigned) & (d6 >= 0) & (d5 <= d6)
+    out[mask] = c[mask]
+    assigned |= mask
+
+    vb = d5 * d2 - d1 * d6
+    denom = d2 - d6
+    w = np.divide(d2, denom, out=np.zeros_like(d2), where=np.abs(denom) > 1e-12)
+    mask = (~assigned) & (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    out[mask] = a[mask] + (w[mask, None] * ac[mask])
+    assigned |= mask
+
+    va = d3 * d6 - d5 * d4
+    denom = (d4 - d3) + (d5 - d6)
+    w = np.divide(d4 - d3, denom, out=np.zeros_like(d4), where=np.abs(denom) > 1e-12)
+    mask = (~assigned) & (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+    out[mask] = b[mask] + (w[mask, None] * (c[mask] - b[mask]))
+    assigned |= mask
+
+    denom = va + vb + vc
+    v = np.divide(vb, denom, out=np.zeros_like(vb), where=np.abs(denom) > 1e-12)
+    w = np.divide(vc, denom, out=np.zeros_like(vc), where=np.abs(denom) > 1e-12)
+    out[~assigned] = a[~assigned] + (ab[~assigned] * v[~assigned, None]) + (ac[~assigned] * w[~assigned, None])
+    return out
+
+
+def _barycentric_coordinates(points, a, b, c):
+    v0 = b - a
+    v1 = c - a
+    v2 = points - a
+    d00 = _dot_rows(v0, v0)
+    d01 = _dot_rows(v0, v1)
+    d11 = _dot_rows(v1, v1)
+    d20 = _dot_rows(v2, v0)
+    d21 = _dot_rows(v2, v1)
+
+    denom = d00 * d11 - d01 * d01
+    v = np.divide(d11 * d20 - d01 * d21, denom, out=np.zeros_like(d20), where=np.abs(denom) > 1e-12)
+    w = np.divide(d00 * d21 - d01 * d20, denom, out=np.zeros_like(d20), where=np.abs(denom) > 1e-12)
+    u = 1.0 - v - w
+    return np.stack((u, v, w), axis=1)
 
 
 def find_closest_point_on_surface(P, V, F):
@@ -69,16 +148,44 @@ def find_closest_point_on_surface(P, V, F):
         B #P by 3 of the barycentric coordinates of the closest point
     """
     
-    sqrD,I,C = igl.point_mesh_squared_distance(P, V, F)
+    if F.shape[0] == 0:
+        raise ValueError("Source mesh has no triangles")
 
-    F_closest = F[I,:]
-    V1 = V[F_closest[:,0],:]
-    V2 = V[F_closest[:,1],:]
-    V3 = V[F_closest[:,2],:]
+    tri_centroids = (V[F[:, 0], :] + V[F[:, 1], :] + V[F[:, 2], :]) / 3.0
+    k = min(32, F.shape[0])
+    tree = cKDTree(tri_centroids)
+    _, candidate_inds = tree.query(P, k=k)
+    if k == 1:
+        candidate_inds = candidate_inds.reshape(-1, 1)
 
-    B = igl.barycentric_coordinates_tri(C, V1, V2, V3)
+    candidate_tris = F[candidate_inds]
+    a = V[candidate_tris[:, :, 0]]
+    b = V[candidate_tris[:, :, 1]]
+    c = V[candidate_tris[:, :, 2]]
 
-    return sqrD,I,C,B
+    p = np.repeat(P[:, None, :], k, axis=1)
+
+    flat_p = p.reshape(-1, 3)
+    flat_a = a.reshape(-1, 3)
+    flat_b = b.reshape(-1, 3)
+    flat_c = c.reshape(-1, 3)
+    flat_cp = _closest_points_on_triangles(flat_p, flat_a, flat_b, flat_c)
+
+    candidate_cp = flat_cp.reshape(P.shape[0], k, 3)
+    candidate_sqr_d = np.sum((candidate_cp - p) ** 2, axis=2)
+
+    best_local = np.argmin(candidate_sqr_d, axis=1)
+    row_idx = np.arange(P.shape[0])
+    I = candidate_inds[row_idx, best_local]
+    C = candidate_cp[row_idx, best_local]
+    sqrD = candidate_sqr_d[row_idx, best_local]
+
+    F_closest = F[I, :]
+    V1 = V[F_closest[:, 0], :]
+    V2 = V[F_closest[:, 1], :]
+    V3 = V[F_closest[:, 2], :]
+    B = _barycentric_coordinates(C, V1, V2, V3)
+    return sqrD, I, C, B
 
 def interpolate_attribute_from_bary(A,B,I,F):
     """
@@ -111,7 +218,10 @@ def interpolate_attribute_from_bary(A,B,I,F):
 
 
 def normalize_vec(v):
-    return v/np.linalg.norm(v)
+    n = np.linalg.norm(v)
+    if n <= 1e-12:
+        return v
+    return v / n
 
 
 def find_matches_closest_surface(source_verts, source_triangles, source_normals, target_verts, target_normals, source_weights, dDISTANCE_THRESHOLD_SQRD, dANGLE_THRESHOLD_DEGREES, flip_vertex_normal):
@@ -145,8 +255,8 @@ def find_matches_closest_surface(source_verts, source_triangles, source_normals,
     
     norm_N1 = np.linalg.norm(N1_match_interpolated, axis=1, keepdims=True)
     norm_N2 = np.linalg.norm(target_normals, axis=1, keepdims=True)
-    normalized_N1 = N1_match_interpolated / norm_N1
-    normalized_N2 = target_normals / norm_N2
+    normalized_N1 = np.divide(N1_match_interpolated, norm_N1, out=np.zeros_like(N1_match_interpolated), where=norm_N1 > 1e-12)
+    normalized_N2 = np.divide(target_normals, norm_N2, out=np.zeros_like(target_normals), where=norm_N2 > 1e-12)
 
     dot_product = np.einsum('ij,ij->i', normalized_N1, normalized_N2)
     dot_product = np.clip(dot_product, -1.0, 1.0)  # Ensure the dot product is in the valid range for arccos
@@ -185,19 +295,46 @@ def inpaint(V2, F2, W2, Matched, point_cloud):
         L, M = robust_laplacian.mesh_laplacian(V2, F2)
     L = -L # igl and robust_laplacian have different laplacian conventions
     
-    Minv = sp.sparse.diags(1 / M.diagonal()) # divide by zero?
+    m_diag = M.diagonal()
+    minv_diag = np.divide(1.0, m_diag, out=np.zeros_like(m_diag), where=np.abs(m_diag) > 1e-12)
+    Minv = sp.sparse.diags(minv_diag)
 
     Q2 = -L + L*Minv*L
     Q2 = Q2.astype(np.float64)
 
-    Aeq = sp.sparse.csc_matrix((0, 0), dtype=np.float64)
-    Beq = np.array([], dtype=np.float64)
-    B = np.zeros(shape = (L.shape[0], W2.shape[1]), dtype=np.float64)
+    b = np.arange(V2.shape[0], dtype=np.int64)[Matched]
+    if b.size == 0:
+        return False, W2
+    bc = W2[Matched, :].astype(np.float64)
 
-    b = np.array(range(0, int(V2.shape[0])), dtype=np.int64)
-    b = b[Matched]
-    bc = W2[Matched,:].astype(np.float64)
-    result, W_inpainted = igl.min_quad_with_fixed(Q2, B, b, bc, Aeq, Beq, True)
+    unknown_mask = np.ones(V2.shape[0], dtype=bool)
+    unknown_mask[b] = False
+    unknown = np.arange(V2.shape[0], dtype=np.int64)[unknown_mask]
+
+    W_inpainted = np.zeros_like(W2, dtype=np.float64)
+    W_inpainted[b, :] = bc
+    result = True
+
+    if unknown.size > 0:
+        Quu = Q2[unknown[:, None], unknown]
+        Qub = Q2[unknown[:, None], b]
+        rhs = -(Qub @ bc)
+        # Tiny diagonal regularization helps when disconnected components make Quu near-singular.
+        Quu = Quu + (sp.sparse.eye(Quu.shape[0], dtype=np.float64, format="csr") * 1e-10)
+
+        try:
+            solver = sp.sparse.linalg.factorized(Quu.tocsc())
+            solved = np.column_stack([solver(rhs[:, i]) for i in range(rhs.shape[1])])
+        except Exception:
+            try:
+                solved = sp.sparse.linalg.spsolve(Quu.tocsc(), rhs)
+                if solved.ndim == 1:
+                    solved = solved[:, None]
+            except Exception:
+                return False, W2
+
+        W_inpainted[unknown, :] = solved
+
     W_inpainted = W_inpainted.astype(np.float32)
     # when W2 shape = (num_verts, 1), it gets flattened to (num_verts, )
     # reshape it back to initial shape, limit_mask expects 2d array
@@ -219,8 +356,9 @@ def limit_mask(weights, adjacency_matrix, dilation_repeat=5, limit_num=4):
     erode_mask = np.logical_and(erode_mask, to_limit[:, np.newaxis])
     erode_mask = sp.sparse.csr_array(erode_mask).astype(np.float32)
     adj_mat = adjacency_matrix
-    degrees = adj_mat.sum(axis=1)
-    smooth_mat = (1/degrees[:, np.newaxis]) * adj_mat
+    degrees = np.asarray(adj_mat.sum(axis=1)).reshape(-1)
+    inv_degrees = np.divide(1.0, degrees, out=np.zeros_like(degrees, dtype=np.float32), where=degrees > 0)
+    smooth_mat = sp.sparse.diags(inv_degrees) @ adj_mat
     for _ in range(dilation_repeat):
         avg_weights = smooth_mat @ erode_mask
         erode_mask = erode_mask.maximum(avg_weights)
@@ -253,12 +391,12 @@ def smooth_weigths(verts, weights, matched, adjacency_matrix, adjacency_list, nu
             get_points_within_distance(verts, i, distance_threshold)
             
     adj_mat = adjacency_matrix.astype(np.float32)
-    degrees = adj_mat.sum(axis=1)
-    
-    smooth_mat = sp.sparse.diags(1/degrees) @ adj_mat
+    degrees = np.asarray(adj_mat.sum(axis=1)).reshape(-1)
+    inv_degrees = np.divide(1.0, degrees, out=np.zeros_like(degrees, dtype=np.float32), where=degrees > 0)
+    smooth_mat = sp.sparse.diags(inv_degrees) @ adj_mat
     weights_smoothed = sp.sparse.csr_array(weights)
     for _ in range(num_smooth_iter_steps):
         weights_smoothed = (1 - smooth_alpha) * weights_smoothed + smooth_alpha * (smooth_mat @ weights_smoothed)
         weights_smoothed[~VIDs_to_smooth] = weights[~VIDs_to_smooth]
-    return weights_smoothed.todense()
+    return np.asarray(weights_smoothed.todense(), dtype=np.float32)
             
