@@ -161,6 +161,7 @@ class RobustWeightTransfer(bpy.types.Operator):
             
             weights_all.append(weights)
         for obj, weights in zip(target_objs, weights_all):
+            object_settings: ObjectSettingsGroup = obj.robust_weight_transfer_settings
             source_vertex_groups = source_obj.vertex_groups
             weight_counts = np.count_nonzero(weights, axis=0)
             for group, w_count in zip(source_vertex_groups, weight_counts):
@@ -259,7 +260,9 @@ class SelectNonMatched(bpy.types.Operator):
                 matched_verts = np.logical_and(matched_verts, ~inpaint_mask_bin)
         
         # get loose part meshes
-        num_conn, conn, num_vertices = igl.connected_components(igl.adjacency_matrix(triangles))
+        import scipy as sp
+        adjacency = util.get_mesh_adjacency_matrix_sparse(obj.data)
+        num_conn, conn = sp.sparse.csgraph.connected_components(adjacency, directed=False, return_labels=True)
         conns = [np.where(conn == i)[0] for i in range(num_conn)]
         matched_per_submesh = [np.count_nonzero(matched_verts[c]) for c in conns]
         zero_matched_submeshes = [i for i, m in enumerate(matched_per_submesh) if m == 0]
@@ -289,10 +292,9 @@ class Inpaint(bpy.types.Operator):
     
     @classmethod
     def poll(cls, context):
+        if not context.active_object: return False
         scene_settings: SceneSettingsGroup = context.scene.robust_weight_transfer_settings
         object_settings: ObjectSettingsGroup = context.active_object.robust_weight_transfer_settings
-        
-        if not context.active_object: return False
         if len(object_settings.inpaint_group) == 0 or object_settings.inpaint_group not in context.active_object.vertex_groups: return False
         
         if scene_settings.use_deformed_target and util.has_modifier(context.active_object, *util.TOPOLOGY_MODS): return False
@@ -818,25 +820,28 @@ class SentFromSpacePanel(bpy.types.Panel):
     
 
 def register():
-    # bpy.types.VIEW3D_MT_make_links.append(menu_func)
-    bpy.utils.register_class(RobustWeightTransfer)
-    bpy.utils.register_class(RobustWeightTransferPanel)
     if missing_deps:
-        bpy.utils.register_class(InstallDependencies)
+        for cls in [RobustWeightTransferPanel, InstallDependencies]:
+            bpy.utils.register_class(cls)
     else:
-        bpy.utils.register_class(SettingsPanel)
-        bpy.utils.register_class(VertexMappingPanel)
-        bpy.utils.register_class(LimitGroupsPanel)
-        bpy.utils.register_class(SmoothingPanel)
         bpy.utils.register_class(ObjectSettingsGroup)
         bpy.utils.register_class(SceneSettingsGroup)
-        bpy.utils.register_class(SelectNonMatched)
-        bpy.utils.register_class(ResetSceneSettings)
-        bpy.utils.register_class(UtilitiesPanel)
-        bpy.utils.register_class(SmoothLimit)
-        bpy.utils.register_class(Inpaint)
         bpy.types.Object.robust_weight_transfer_settings = bpy.props.PointerProperty(type=ObjectSettingsGroup)
         bpy.types.Scene.robust_weight_transfer_settings = bpy.props.PointerProperty(type=SceneSettingsGroup)
+        for cls in [
+            RobustWeightTransfer,
+            SelectNonMatched,
+            Inpaint,
+            SmoothLimit,
+            ResetSceneSettings,
+            RobustWeightTransferPanel,
+            SettingsPanel,
+            VertexMappingPanel,
+            LimitGroupsPanel,
+            SmoothingPanel,
+            UtilitiesPanel,
+        ]:
+            bpy.utils.register_class(cls)
         
     if 'VIEW3D_PT_sent_from_space_panel' in dir(bpy.types):
         if SentFromSpacePanel.version > bpy.types.VIEW3D_PT_sent_from_space_panel.version:
@@ -848,25 +853,28 @@ def register():
     
     
 def unregister():
-    # bpy.types.VIEW3D_MT_make_links.remove(menu_func)
-    bpy.utils.unregister_class(RobustWeightTransfer)
-    bpy.utils.unregister_class(RobustWeightTransferPanel)
     if missing_deps:
-        bpy.utils.unregister_class(InstallDependencies)
+        for cls in [InstallDependencies, RobustWeightTransferPanel]:
+            bpy.utils.unregister_class(cls)
     else:
-        bpy.utils.unregister_class(SettingsPanel)
-        bpy.utils.unregister_class(VertexMappingPanel)
-        bpy.utils.unregister_class(LimitGroupsPanel)
-        bpy.utils.unregister_class(SmoothingPanel)
-        bpy.utils.unregister_class(ObjectSettingsGroup)
-        bpy.utils.unregister_class(SceneSettingsGroup)
-        bpy.utils.unregister_class(SelectNonMatched)
-        bpy.utils.unregister_class(ResetSceneSettings)
-        bpy.utils.unregister_class(UtilitiesPanel)
-        bpy.utils.unregister_class(SmoothLimit)
-        bpy.utils.unregister_class(Inpaint)
         del bpy.types.Object.robust_weight_transfer_settings
         del bpy.types.Scene.robust_weight_transfer_settings
+        for cls in [
+            UtilitiesPanel,
+            SmoothingPanel,
+            LimitGroupsPanel,
+            VertexMappingPanel,
+            SettingsPanel,
+            RobustWeightTransferPanel,
+            ResetSceneSettings,
+            SmoothLimit,
+            Inpaint,
+            SelectNonMatched,
+            RobustWeightTransfer,
+            SceneSettingsGroup,
+            ObjectSettingsGroup,
+        ]:
+            bpy.utils.unregister_class(cls)
     SentFromSpacePanel._unregister()
     
 

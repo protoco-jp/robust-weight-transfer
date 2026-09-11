@@ -40,7 +40,7 @@ Changes to the original work:
 - Allow flipped normals 
     - Handles solid meshes when vertex normals show into opposite direction of the vertex normals on the body
 - Remesh using Robust Laplacian's point cloud Laplacian (During Point mode)
-    - Workarounds `libigl.min_quad_with_fixed` failing during Inpaint when a disconnected mesh doesn't have any known values/matches
+    - Workarounds constrained sparse solve failures during Inpaint when a disconnected mesh doesn't have any known values/matches
 
 
 
