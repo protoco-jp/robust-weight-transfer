@@ -83,12 +83,14 @@ def draw_debug_vertex_colors(obj, matched):
     mesh: bpy.types.Mesh = obj.data
     if not isinstance(mesh, bpy.types.Mesh): return
 
-    if "RBT Matched" in mesh.vertex_colors:
-        color_layer = mesh.vertex_colors["RBT Matched"]
+    color_attrs = mesh.color_attributes
+    if "RBT Matched" in color_attrs:
+        color_layer = color_attrs["RBT Matched"]
     else:
-        color_layer = mesh.vertex_colors.new(name="RBT Matched")
-    if not color_layer: return False
-    color_layer.active = True
+        color_layer = color_attrs.new(name="RBT Matched", type='FLOAT_COLOR', domain='CORNER')
+    if not color_layer:
+        return False
+
     loop_ind = np.zeros(len(mesh.loops), dtype=np.int64)
     mesh.loops.foreach_get('vertex_index', loop_ind)
     loop_matched = matched[loop_ind]
@@ -96,7 +98,10 @@ def draw_debug_vertex_colors(obj, matched):
     color_data[~loop_matched] = [234/255, 0, 255/255, 1.0]
     color_layer.data.foreach_set("color", color_data.reshape(-1))
     mesh.update()
-    mesh.vertex_colors.active = color_layer
+    try:
+        mesh.color_attributes.active_color = color_layer
+    except Exception:
+        pass
     return True
     
     
