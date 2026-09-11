@@ -20,8 +20,8 @@
 bl_info = {
     "name": "Robust Weight Transfer",
     "author": "sentfromspacevr",
-    "version": (1, 1, 9),
-    "blender": (3, 1, 0),
+    "version": (1, 2, 0),
+    "blender": (5, 2, 0),
     "doc_url": "https://jinxxy.com/SentFromSpaceVR/robust-weight-transfer",
     "location": "View3D > Sidebar > SENT Tab",
     "category": "Object",
@@ -29,7 +29,6 @@ bl_info = {
 
 import sys
 import os
-import sysconfig
 import site
 
 import bpy
@@ -42,27 +41,23 @@ import subprocess
 import bpy.utils.previews
 
 libs_path = os.path.join(os.path.dirname(__file__), 'deps')
-scheme = sysconfig.get_preferred_scheme("user")
-user_site = sysconfig.get_paths(scheme, vars={"userbase": libs_path})["purelib"]
-site.addsitedir(user_site)
+os.makedirs(libs_path, exist_ok=True)
+site.addsitedir(libs_path)
 
-DEPENDENCIES = ["robust_laplacian", "igl", "scipy"]
+DEPENDENCIES = {
+    "robust_laplacian": "robust-laplacian",
+    "scipy": "scipy",
+}
 missing_deps = []
-for module in DEPENDENCIES:
+for module, package in DEPENDENCIES.items():
     try:
         importlib.import_module(module)
     except ImportError:
-        if module == "igl":
-            missing_deps.append("libigl==2.5.1")
-        else:
-            missing_deps.append(module)
+        missing_deps.append(package)
 
 installed_deps = False
 
-print(missing_deps)
-
 if not missing_deps:
-    import igl
     from .weighttransfer import find_matches_closest_surface, inpaint, limit_mask, smooth_weigths
     from . import util
 
@@ -683,25 +678,39 @@ class InstallDependencies(bpy.types.Operator):
     
     def execute(self, context):
         python_exe = sys.executable
-        print(python_exe)
+        print(f"[RWT] Blender Python executable: {python_exe}")
         try:
-            # create a constraints.txt to constrain the dependency install to the numpy version that blender ships with
-            constraints_path = os.path.join(os.path.dirname(__file__), "constraints.txt")
-            with open(constraints_path, "w") as f:
-                f.write(f"numpy=={np.__version__}\n")
-                f.write(f"robust_laplacian==1.0.0\n") 
+            cmd = [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--upgrade",
+                "--only-binary=:all:",
+                "--target",
+                libs_path,
+                *missing_deps,
+            ]
+            print("[RWT] Installing dependencies with command:", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.stdout:
+                print("[RWT][pip][stdout]\n" + result.stdout)
+            if result.stderr:
+                print("[RWT][pip][stderr]\n" + result.stderr)
+            if result.returncode != 0:
+                self.report({'ERROR'}, "Dependency installation failed. See Blender console for details.")
+                return {'CANCELLED'}
 
-            # we do a pip user install under a custom user base path
-            # makes use of existing installed python packages like numpy, still uses pips dependency resolution and keeps it isolated
-            env = os.environ.copy()
-            env["PYTHONUSERBASE"] = libs_path
-            subprocess.check_call([python_exe, "-m", "pip", "install", "--user", *missing_deps, "--break-system-packages", "-c", constraints_path], env=env)
+            importlib.invalidate_caches()
+            site.addsitedir(libs_path)
             self.report({'INFO'}, "Installation successful! Please restart Blender.")
             global installed_deps
             installed_deps = True
             return {'FINISHED'}
-        except subprocess.CalledProcessError as e:
-            self.report({'ERROR'}, f"Installation failed: {str(e)}")
+        except Exception as e:
+            print(f"[RWT] Dependency installation exception: {e}")
+            self.report({'ERROR'}, f"Dependency installation failed: {e}")
             return {'CANCELLED'}
 
 class SentFromSpacePanel(bpy.types.Panel):
